@@ -94,6 +94,7 @@ class MissionControlNode(Node):
         self.current_y = 0.0
         self.current_yaw = 0.0
         self.odom_frame = "warthog/odom"
+        self.dist = 120
 
         self.get_logger().info("Mission Control initialized.")
 

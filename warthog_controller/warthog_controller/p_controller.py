@@ -4,7 +4,7 @@ import numpy as np
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Bool
-from geometry_msgs.msg import TwistStamped, PoseStamped
+from geometry_msgs.msg import Twist, PoseStamped
 from nav_msgs.msg import Odometry
 
 
@@ -26,12 +26,12 @@ class Controller(Node):
         super().__init__('p_controller_node')
 
         # Declare parameters
-        self.declare_parameter('cmd_vel_topic', 'warthog/cmd_vel')
+        self.declare_parameter('cmd_vel_topic', 'warthog/cmd_vel_step')
         self.declare_parameter('odom_topic', 'warthog/odom')
         self.declare_parameter('new_pos_topic', 'warthog/new_position')
         self.declare_parameter('reached_topic', 'warthog/reached')
-        self.declare_parameter('kp_linear', 0.5)
-        self.declare_parameter('kp_angular', 1.0)
+        self.declare_parameter('kp_linear', 0.2)
+        self.declare_parameter('kp_angular', 0.5)
         self.declare_parameter('dist_tolerance', 0.05)
         self.declare_parameter('yaw_tolerance', 0.05)
         self.declare_parameter('max_linear_speed', 0.5)
@@ -54,7 +54,7 @@ class Controller(Node):
         self.base_frame = self.get_parameter('base_frame').value
 
         # Publishers and Subscribers
-        self.publisher = self.create_publisher(TwistStamped, cmd_vel_topic, 10)
+        self.publisher = self.create_publisher(Twist, cmd_vel_topic, 10)
         self.reached_publisher = self.create_publisher(Bool, reached_topic, 10)
         self.odom_subscriber = self.create_subscription(Odometry, odom_topic, self.msg_callback, 10)
         self.new_pos_subscriber = self.create_subscription(PoseStamped, new_pos_topic, self.new_pos_callback, 1)
@@ -71,7 +71,10 @@ class Controller(Node):
         self.goal_x = None
         self.goal_y = None
         self.goal_yaw = None
-        self.goal_reached = False
+        self.goal_reached = False 
+        self.sature = 0.2
+        self.sature_ang = 0.2
+        self.dist = 0.90
 
         self.get_logger().info(f"P-Controller initialized. Controlling on {cmd_vel_topic}, listening to {new_pos_topic}")
 
@@ -85,19 +88,24 @@ class Controller(Node):
         self.goal_y = msg.pose.position.y
         self.goal_yaw = get_yaw_from_quaternion(msg.pose.orientation)
         self.goal_reached = False
-        self.get_logger().info(
-            f"New goal received: x={self.goal_x:.2f}, y={self.goal_y:.2f}, yaw={self.goal_yaw:.2f}"
-        )
+        # self.get_logger().info(
+        #     f"New goal received: x={self.goal_x:.2f}, y={self.goal_y:.2f}, yaw={self.goal_yaw:.2f}"
+        # )
 
     def timer_callback(self):
         if self.goal_x is None:
             return
 
         # Calculate Cartesian distance errors
-        dx = self.goal_x - self.x
-        dy = self.goal_y - self.y
+        dx = self.goal_x
+        dy = self.goal_y 
+        print(f'goal_x {dx}')
+        dx = dx - self.dist
+        print(f'goal after {dx}')
+        print(f'dy {dy}')
+        
         dist_error = math.hypot(dx, dy)
-
+        print(f'dist error {dist_error}')
         x_speed = 0.0
         z_speed = 0.0
 
@@ -134,17 +142,28 @@ class Controller(Node):
                 z_speed = 0.0
                 if not self.goal_reached:
                     self.goal_reached = True
-                    self.get_logger().info("Target position and orientation reached!")
+                    #self.get_logger().info("Target position and orientation reached!")
                     reached_msg = Bool()
                     reached_msg.data = True
                     self.reached_publisher.publish(reached_msg)
 
+        # if x_speed > self.sature:
+        #     x_speed = self.sature
+        # elif x_speed < -self.sature:
+        #     x_speed = -self.sature
+
+        # if z_speed > self.sature_ang or z_speed < -self.sature_ang:
+        #     z_speed = self.sature_ang
+
+        
+        x_speed = np.clip(x_speed, -self.sature, self.sature)
+        z_speed = np.clip(z_speed, -self.sature_ang, self.sature_ang)
         # Publish TwistStamped
-        new_msg = TwistStamped()
-        new_msg.header.stamp = self.get_clock().now().to_msg()
-        new_msg.header.frame_id = self.base_frame
-        new_msg.twist.linear.x = x_speed
-        new_msg.twist.angular.z = z_speed
+        new_msg = Twist()
+        # new_msg.header.stamp = self.get_clock().now().to_msg()
+        # new_msg.header.frame_id = self.base_frame
+        new_msg.linear.x = x_speed
+        new_msg.angular.z = z_speed
 
         self.publisher.publish(new_msg)
 
