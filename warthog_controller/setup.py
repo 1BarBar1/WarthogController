@@ -27,6 +27,7 @@ setup(
             'mission_control_node = warthog_controller.mission_control:main',
             'p_controller_node = warthog_controller.p_controller:main',
             'slow_controller_node = warthog_controller.p_controller:main',
+            'visual_servo_node = warthog_controller.visual_servo:main',
         ],
     },
 )
