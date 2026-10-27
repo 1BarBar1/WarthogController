@@ -69,9 +69,9 @@ class MissionControlNode(Node):
         self.camera_subscription = self.create_subscription(PoseArray, self.camera_topic, self.camera_feedback_callback, 10)
         self.path_subscription = self.create_subscription(Path, self.path_topic, self.path_feedback_callback, 10)
         self.odom_subscription = self.create_subscription(Odometry, 'warthog/odom', self.odom_callback, 10)
-        
+
         self.nav_cancel_client = self.create_client(CancelGoal, 'warthog/navigate_to_pose/_action/cancel_goal')
-        
+
         self.current_x = None
         self.current_y = None
         self.distance_tolerance = 0.5 # Meters tolerance
@@ -111,10 +111,7 @@ class MissionControlNode(Node):
             self.get_logger().warn("Pipeline is already executing. Trigger ignored.")
 
     def send_arm_r_home_goal(self):
-        if not self._arm_r_action_client.wait_for_server(timeout_sec=3.0):
-            self.get_logger().warn("Arm R controller action server not reached within 3s. Launching perception & MoveIt directly...")
-            self.launch_scripts()
-            return
+
 
         goal_msg = FollowJointTrajectory.Goal()
         goal_msg.trajectory.joint_names = [
@@ -154,14 +151,14 @@ class MissionControlNode(Node):
     def launch_scripts(self):
 
         moveit_workspace_setup = "/home/warthog/Public/harry_summerjob/robobuilder_native/Robobuilder_moveit2_perception/install/setup.bash"
-        
+
         # Chain the source command and the ros2 launch command together
         cmd_moveit = f"source {moveit_workspace_setup} && ros2 launch hello_moveit pick_place_ur5e.launch.py"
-        
+
         # Note: We use shell=True and specify bash so the 'source' command works properly
         self.process_moveit = subprocess.Popen(cmd_moveit, shell=True, executable='/bin/bash')
         self.get_logger().info(f"Started hello_moveit (PID {self.process_moveit.pid}) from external workspace")
-        
+
         # Finalize the mission log
         self.missionLog.check_done_mission()
         self.get_logger().info("All missions complete!")
@@ -172,18 +169,23 @@ class MissionControlNode(Node):
     def start_robot(self):
         self.start_timer.cancel()
         current = self.missionLog.current_mission()
-        
+
         if current == "explore":
             self.trigger_exploration(True)
-        elif current == "Pathing": 
+        elif current == "Pathing":
             self.trigger_path(True)
         elif current == "visual_tune":
-            #self.send_arm_r_home_goal()
+            self.send_arm_r_home_goal()
+            self.trigger_visual_servo(True)
             self.get_logger().info("waiting on camera data visual_tune...")
         elif current == "hello_moveit":
+
             self.get_logger().info("Resuming at hello_moveit! Triggering arm sequence...")
             if not self.is_processing:
                 self.is_processing = True
+                if not self._arm_r_action_client.wait_for_server(timeout_sec=3.0):
+                    self.get_logger().warn("Arm R controller action server not reached within 3s. Launching perception & MoveIt directly...")
+                    self.launch_scripts()
                 self.send_arm_r_home_goal()
         elif current is not None:
             val = self.missionLog.next_mission()
@@ -199,7 +201,7 @@ class MissionControlNode(Node):
     def trigger_path(self, enable: bool):
         self.path_enable = enable
         self.get_logger().info(f"{'Started' if enable else 'Stopped'} pathing.")
-        
+
     def trigger_visual_servo(self, enable: bool):
         self.vs_trigger_publisher.publish(Bool(data=enable))
         self.is_visual_servoing = enable
@@ -210,7 +212,7 @@ class MissionControlNode(Node):
             return
 
         current = self.missionLog.current_mission()
-        
+
         if self.is_exploring:
             self.trigger_exploration(False)
             self.missionLog.check_done_mission()
@@ -257,42 +259,42 @@ class MissionControlNode(Node):
             return
 
         current = self.missionLog.current_mission()
-        if current != "Pathing": 
+        if current != "Pathing":
             return
 
         if self.path_enable:
             if self.current_x is None or self.current_y is None:
                 self.get_logger().warn("Waiting for odometry data to check path distance...")
                 return
-            
+
             last_pose = msg.poses[-1].pose.position
             distance = math.hypot(last_pose.x - self.current_x, last_pose.y - self.current_y)
-            
+
             if distance < self.distance_tolerance:
                 self.get_logger().info("Reached the last point! Canceling Nav2 mission...")
-                
+
                 self.trigger_path(False)
-                
+
                 if self.nav_cancel_client.wait_for_service(timeout_sec=1.0):
                     cancel_req = CancelGoal.Request()
                     self.nav_cancel_client.call_async(cancel_req)
                 else:
                     self.get_logger().warn("Nav2 cancel service not available!")
-                
+
                 self.missionLog.check_done_mission()
-                
+
                 next_stage = self.missionLog.current_mission()
                 if next_stage is None:
                     self.get_logger().info("All missions done.")
                     return
-                
+
                 next_goal = self.missionLog.next_mission()
                 if next_goal and next_goal != "":
                     x, y, yaw = map(float, next_goal.split(','))
                     self.publish_goal(x, y, yaw)
                 elif next_stage == "visual_tune":
                     self.get_logger().info("Switching to visual_tune. Waiting on camera...")
-                
+
     def camera_feedback_callback(self, msg: PoseArray):
         if not msg.poses:
             return
@@ -305,9 +307,9 @@ class MissionControlNode(Node):
             self.get_logger().info("Stop exploring, start visual servo")
             if self.is_exploring:
                 self.trigger_exploration(False)
-            
+
             self.trigger_visual_servo(True)
-            
+
     # Clean up subprocesses properly on shutdown
     def destroy_node(self):
         self.get_logger().info("Shutting down processes...")

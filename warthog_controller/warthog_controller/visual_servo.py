@@ -30,7 +30,7 @@ class VisualServoController(Node):
 
         cmd_vel_topic = self.get_parameter('cmd_vel_topic').value
         camera_topic = self.get_parameter('camera_topic').value
-        
+
         self.kp_linear = float(self.get_parameter('kp_linear').value)
         self.kp_angular = float(self.get_parameter('kp_angular').value)
         self.standoff_distance = float(self.get_parameter('standoff_distance').value)
@@ -43,6 +43,7 @@ class VisualServoController(Node):
         self.stop_counter = 0
         self.stop_bound = 5
         self.stoped = False
+        self.goal_reached = False
         self.target_frame = 'warthog/base_link'
         self.active = False
 
@@ -53,16 +54,18 @@ class VisualServoController(Node):
         self.reached_publisher = self.create_publisher(Bool, reached_topic, 10)
 
         self.get_logger().info("Visual Servo Controller started.")
-    def vs_callback(self,msg):
-        if not msg:
-            return
-        if msg is True:
+    def vs_callback(self, msg: Bool):
+        # Fixed: Use msg.data instead of comparing msg object directly
+        if msg.data:
             self.active = True
-        if msg is False:
+            self.get_logger().info("Visual Servo activated via trigger!")
+        else:
             self.active = False
+            self.get_logger().info("Visual Servo deactivated via trigger!")
     def camera_callback(self, msg: PoseArray):
-        #if self.active is False:
-         #   return
+        if self.active is False:
+           print("why")
+           return
         if self.stop_counter > self.stop_bound:
             if self.stoped is False:
                 self.stop_robot()
@@ -75,10 +78,10 @@ class VisualServoController(Node):
                 self.reached_publisher.publish(reached_msg)
             return
         if not msg.poses:
-        
+
             self.stop_robot()
             return
-        
+
         pose_to_transform = PoseStamped()
         pose_to_transform.header = msg.header
         pose_to_transform.pose = msg.poses[0]
@@ -96,7 +99,7 @@ class VisualServoController(Node):
 
         # 3. Access the actual pose data inside the PoseStamped
         detected_pose = transformed_pose.pose
-        
+
         # Use the original message's frame_id to check if it was an optical frame
         frame_id = msg.header.frame_id.lower()
 
@@ -116,19 +119,19 @@ class VisualServoController(Node):
         dist_to_obj = math.hypot(rel_forward, rel_lateral)
         dist_error = dist_to_obj - self.standoff_distance
         print(f'dist error {dist_error}')
-        
-       
+
+
         target_angle = math.atan2(rel_lateral, rel_forward)
 
         x_speed = 0.0
         z_speed = 0.0
 
-        
+
         if abs(dist_error) > self.dist_tolerance:
             x_speed = self.kp_linear * dist_error
             z_speed = self.kp_angular * target_angle
-            
-          
+
+
             x_speed = np.clip(x_speed, -self.max_linear_speed, self.max_linear_speed)
             z_speed = np.clip(z_speed, -self.max_angular_speed, self.max_angular_speed)
         else:
