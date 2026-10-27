@@ -65,6 +65,7 @@ class VisualServoController(Node):
     def camera_callback(self, msg: PoseArray):
         if self.active is False:
            print("why")
+           
            return
         if self.stop_counter > self.stop_bound:
             if self.stoped is False:

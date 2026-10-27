@@ -49,7 +49,7 @@ class MissionControlNode(Node):
         self.declare_parameter("auto_start", True)
         # "wating":"","Pathing":""
         # Change this line in __init__:
-        missions = {"visual_tune": "", "hello_moveit": ""}
+        missions = {"Pathing":"","visual_tune": "", "hello_moveit": ""}
         self.missionLog = MissionLog(missions)
 
         explore_topic = self.get_parameter("exploration_trigger").value
@@ -68,7 +68,7 @@ class MissionControlNode(Node):
         self.finished_subscription = self.create_subscription(Bool, reached_topic, self.finished_callback, 10)
         self.camera_subscription = self.create_subscription(PoseArray, self.camera_topic, self.camera_feedback_callback, 10)
         self.path_subscription = self.create_subscription(Path, self.path_topic, self.path_feedback_callback, 10)
-        self.odom_subscription = self.create_subscription(Odometry, 'warthog/odom', self.odom_callback, 10)
+        self.odom_subscription = self.create_subscription(Odometry, 'warthog/odometry/imu', self.odom_callback, 10)
 
         self.nav_cancel_client = self.create_client(CancelGoal, 'warthog/navigate_to_pose/_action/cancel_goal')
 
@@ -233,6 +233,8 @@ class MissionControlNode(Node):
             x, y, yaw = map(float, next_goal.split(','))
             self.publish_goal(x, y, yaw)
         elif next_stage == "visual_tune":
+            self.send_arm_r_home_goal()
+            self.trigger_visual_servo(True)
             self.get_logger().info("Switch to visual_tune. waiting on camera...")
         elif next_stage == "hello_moveit":
             self.get_logger().info("Switching to hello_moveit! Triggering arm sequence...")
@@ -278,6 +280,7 @@ class MissionControlNode(Node):
                 if self.nav_cancel_client.wait_for_service(timeout_sec=1.0):
                     cancel_req = CancelGoal.Request()
                     self.nav_cancel_client.call_async(cancel_req)
+                    self.get_logger().warn("Nav2 cancel service!")
                 else:
                     self.get_logger().warn("Nav2 cancel service not available!")
 
@@ -287,13 +290,16 @@ class MissionControlNode(Node):
                 if next_stage is None:
                     self.get_logger().info("All missions done.")
                     return
+                elif next_stage == "visual_tune":
+                    self.send_arm_r_home_goal()
+                    self.trigger_visual_servo(True)
+                    self.get_logger().info("Switching to visual_tune. Waiting on camera...")
 
                 next_goal = self.missionLog.next_mission()
                 if next_goal and next_goal != "":
                     x, y, yaw = map(float, next_goal.split(','))
                     self.publish_goal(x, y, yaw)
-                elif next_stage == "visual_tune":
-                    self.get_logger().info("Switching to visual_tune. Waiting on camera...")
+                
 
     def camera_feedback_callback(self, msg: PoseArray):
         if not msg.poses:
