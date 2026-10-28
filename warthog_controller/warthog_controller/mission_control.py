@@ -2,6 +2,7 @@
 import rclpy
 from rclpy.node import Node
 from rclpy.action import ActionClient
+# rclpy.time import Time
 from std_msgs.msg import Bool
 from geometry_msgs.msg import PoseArray, PoseStamped
 from nav_msgs.msg import Path, Odometry
@@ -10,6 +11,7 @@ from control_msgs.action import FollowJointTrajectory
 from trajectory_msgs.msg import JointTrajectoryPoint
 import tf2_ros
 import tf2_geometry_msgs
+import time as time
 from builtin_interfaces.msg import Duration
 from typing import Optional
 import math
@@ -53,7 +55,7 @@ class MissionControlNode(Node):
         self.declare_parameter("auto_start", True)
         # "wating":"","Pathing":"""Pathing":"",
         # Change this line in __init__:
-        missions = {"visual_tune": "", "hello_moveit": ""}
+        missions = {"Pathing":"","visual_tune": "", "hello_moveit": ""}
         self.missionLog = MissionLog(missions)
 
         explore_topic = self.get_parameter("exploration_trigger").value
@@ -108,8 +110,8 @@ class MissionControlNode(Node):
     # TRIGGER MANAGER LOGIC
     # ---------------------------------------------------------
     def launch_scripts(self):
-        # moveit_workspace_setup = "/home/warthog/Public/harry_summerjob/robobuilder_native/Robobuilder_moveit2_perception/install/setup.bash"
-        moveit_workspace_setup = "install/setup.bash"
+        moveit_workspace_setup = "/home/warthog/Public/harry_summerjob/robobuilder_native/Robobuilder_moveit2_perception/install/setup.bash"
+        #moveit_workspace_setup = "install/setup.bash"
         # Chain the source command and the ros2 launch command together
         cmd_moveit = f"source {moveit_workspace_setup} && ros2 launch hello_moveit pick_place_ur5e.launch.py"
 
@@ -219,6 +221,7 @@ class MissionControlNode(Node):
         self.get_logger().info(f"{'Started' if enable else 'Stopped'} pathing.")
 
     def trigger_visual_servo(self, enable: bool):
+        time.sleep(10)
         self.vs_trigger_publisher.publish(Bool(data=enable))
         self.is_visual_servoing = enable
         self.get_logger().info(f"{'Started' if enable else 'Stopped'} visual servoing.")
@@ -271,6 +274,15 @@ class MissionControlNode(Node):
         self.current_x = msg.pose.pose.position.x
         self.current_y = msg.pose.pose.position.y
 
+    def transformToPose(self,t):
+        pose = PoseStamped()
+        pose.header=t.header
+        pose.pose.position.x=t.transform.translation.x
+        pose.pose.position.y=t.transform.translation.y
+        pose.pose.position.z=t.transform.translation.z
+        pose.pose.orientation=t.transform.rotation
+        return pose
+
     def path_feedback_callback(self, msg: Path):
         if not msg.poses:
             return
@@ -286,24 +298,30 @@ class MissionControlNode(Node):
                 self.get_logger().warn("Waiting for odometry data to check path distance...")
                 return
 
-            pose_to_transform = PoseStamped()
-            pose_to_transform.header = msg.header
-            pose_to_transform.pose = msg.poses[-1]
+            endOfPath = PoseStamped()
+            endOfPath.header = msg.header
+            endOfPath.pose = msg.poses[-1]
+            #print(f'end of pose {endOfPath.pose.position.x}, {endOfPath.pose.position.y}')
 
             try:
                 # 2. Transform the PoseStamped
-                transformed_pose = self.tf_buffer.transform(
-                    pose_to_transform,
-                    self.target_frame,
-                    timeout=rclpy.duration.Duration(seconds=0.05),
+                tfPose = self.tf_buffer.lookup_transform(
+                    #endOfPath,
+                    'warthog/map',
+                    'warthog/base_link',
+
+                    # timeout=rclpy.duration.Duration(seconds=0.1),
+                    rclpy.time.Time(),
                 )
+                robotCurrentPose=self.transformToPose(tfPose)
             except (tf2_ros.LookupException, tf2_ros.ConnectivityException, tf2_ros.ExtrapolationException) as ex:
                 self.get_logger().warn(f'Could not transform: {ex}')
                 return
 
-            last_pose = transformed_pose.pose.position
-            distance = math.hypot(last_pose.x - self.current_x, last_pose.y - self.current_y)
-
+            last_pose = robotCurrentPose.pose.position
+            print(last_pose.x, last_pose.y)
+            distance = math.hypot(endOfPath.pose.pose.position.x - robotCurrentPose.pose.position.x, endOfPath.pose.pose.position.y - robotCurrentPose.pose.position.y)
+            print(distance)
             if distance < self.distance_tolerance:
                 self.get_logger().info("Reached the last point! Canceling Nav2 mission...")
 
