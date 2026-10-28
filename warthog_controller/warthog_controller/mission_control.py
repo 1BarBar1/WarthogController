@@ -8,6 +8,8 @@ from nav_msgs.msg import Path, Odometry
 from action_msgs.srv import CancelGoal
 from control_msgs.action import FollowJointTrajectory
 from trajectory_msgs.msg import JointTrajectoryPoint
+import tf2_ros
+import tf2_geometry_msgs
 from builtin_interfaces.msg import Duration
 from typing import Optional
 import math
@@ -38,6 +40,8 @@ class MissionLog:
 class MissionControlNode(Node):
     def __init__(self):
         super().__init__("mission_control")
+        self.tf_buffer = tf2_ros.Buffer()
+        self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
 
         # Parameters
         self.declare_parameter("exploration_trigger", "warthog/exploration_trigger")
@@ -79,7 +83,7 @@ class MissionControlNode(Node):
         self.is_exploring = False
         self.is_visual_servoing = False
         self.path_enable = False
-
+        self.target_frame = 'warthog/base_link'
         # --- Trigger Manager Additions ---
         self.start_trigger_sub = self.create_subscription(Bool, "warthog/start_trigger", self.trigger_callback, 10)
         self._arm_r_action_client = ActionClient(
@@ -90,6 +94,7 @@ class MissionControlNode(Node):
         self.process_oden = None
         self.process_moveit = None
         self.is_processing = False
+
 
         self.get_logger().info("============================================================")
         self.get_logger().info("Mission Control Node Active!")
@@ -122,7 +127,42 @@ class MissionControlNode(Node):
             self.send_arm_r_home_goal()
         elif self.is_processing:
             self.get_logger().warn("Pipeline is already executing. Trigger ignored.")
+    def send_arm_r_home_pose(self):
+        """Sends Arm R to the predefined 'home' group state configuration."""
+        goal_msg = FollowJointTrajectory.Goal()
+        goal_msg.trajectory.joint_names = [
+            "arm_r_shoulder_pan_joint",
+            "arm_r_shoulder_lift_joint",
+            "arm_r_elbow_joint",
+            "arm_r_wrist_1_joint",
+            "arm_r_wrist_2_joint",
+            "arm_r_wrist_3_joint",
+        ]
 
+        point = JointTrajectoryPoint()
+        # Joint values from your <group_state name="home" group="ur5e_manipulator_r">
+        point.positions = [-0.1745, -3.4034, 2.7053, -1.6581, -1.5708, 0.2967]
+        point.time_from_start = Duration(sec=5, nanosec=0)
+        goal_msg.trajectory.points.append(point)
+
+        self.get_logger().info("Sending trajectory goal for Arm R 'home' pose...")
+        send_goal_future = self._arm_r_action_client.send_goal_async(goal_msg)
+        send_goal_future.add_done_callback(self.home_goal_response_callback)
+
+    def home_goal_response_callback(self, future):
+        goal_handle = future.result()
+        if not goal_handle.accepted:
+            self.get_logger().error("Arm R 'home' pose goal rejected by controller!")
+            self.is_processing = False
+            return
+
+        self.get_logger().info("Arm R 'home' goal accepted. Moving...")
+        get_result_future = goal_handle.get_result_async()
+        get_result_future.add_done_callback(self.home_get_result_callback)
+
+    def home_get_result_callback(self, future):
+        self.get_logger().info("Arm R has reached 'home' pose successfully!")
+        self.is_processing = False
     def send_arm_r_home_goal(self):
         self.get_logger().info("Waiting for Arm R controller action server...")
         if not self._arm_r_action_client.wait_for_server(timeout_sec=3.0):
@@ -163,18 +203,8 @@ class MissionControlNode(Node):
 
     def get_result_callback(self, future):
         self.get_logger().info("Arm R has reached gripping_pose successfully!")
-        self.on_arm_movement_finished()
-
-    def on_arm_movement_finished(self):
-        """Routes the state machine AFTER the arm finishes moving."""
-        current = self.missionLog.current_mission()
-        
-        if current == "visual_tune":
-            self.get_logger().info("Arm is in position. Starting visual servoing now...")
-            self.trigger_visual_servo(True)
-        elif current == "hello_moveit":
-            self.get_logger().info("Arm is in position. Launching hello_moveit scripts...")
-            self.launch_scripts()
+        self.get_logger().info("Step 2: Launching 'oden publisher' and 'hello_moveit pick_place_ur5e'...")
+        self.launch_scripts()
 
     # ---------------------------------------------------------
     # MISSION CONTROL LOGIC
@@ -199,6 +229,13 @@ class MissionControlNode(Node):
                     self.get_logger().warn("Arm R controller action server not reached within 3s. Launching perception & MoveIt directly...")
                     self.launch_scripts()
                 self.send_arm_r_home_goal()
+        elif current == "home":
+            self.get_logger().info("Executing 'home' mission step...")
+            if not self.is_processing:
+                self.is_processing = True
+                self.send_arm_r_home_pose()
+                # Mark as done once initiated or wait for result callback to call check_done_mission()
+                self.missionLog.check_done_mission()
         elif current is not None:
             val = self.missionLog.next_mission()
             if val and val != "":
@@ -252,6 +289,13 @@ class MissionControlNode(Node):
             if not self.is_processing:
                 self.is_processing = True
                 self.send_arm_r_home_goal()
+        elif current == "home":
+            self.get_logger().info("Executing 'home' mission step...")
+            if not self.is_processing:
+                self.is_processing = True
+                self.send_arm_r_home_pose()
+                # Mark as done once initiated or wait for result callback to call check_done_mission()
+                self.missionLog.check_done_mission()
 
     def publish_goal(self, x: float, y: float, yaw: float = 0.0):
         goal_msg = PoseStamped()
@@ -275,12 +319,29 @@ class MissionControlNode(Node):
         if current != "Pathing":
             return
 
+
+
         if self.path_enable:
             if self.current_x is None or self.current_y is None:
                 self.get_logger().warn("Waiting for odometry data to check path distance...")
                 return
 
-            last_pose = msg.poses[-1].pose.position
+            pose_to_transform = PoseStamped()
+            pose_to_transform.header = msg.header
+            pose_to_transform.pose = msg.poses[-1]
+
+            try:
+                # 2. Transform the PoseStamped
+                transformed_pose = self.tf_buffer.transform(
+                    pose_to_transform,
+                    self.target_frame,
+                    timeout=rclpy.duration.Duration(seconds=0.05),
+                )
+            except (tf2_ros.LookupException, tf2_ros.ConnectivityException, tf2_ros.ExtrapolationException) as ex:
+                self.get_logger().warn(f'Could not transform: {ex}')
+                return
+
+            last_pose = transformed_pose.pose.position
             distance = math.hypot(last_pose.x - self.current_x, last_pose.y - self.current_y)
 
             if distance < self.distance_tolerance:
@@ -309,7 +370,16 @@ class MissionControlNode(Node):
                 if next_goal and next_goal != "":
                     x, y, yaw = map(float, next_goal.split(','))
                     self.publish_goal(x, y, yaw)
-                
+                elif next_stage == "visual_tune":
+                    self.get_logger().info("Switching to visual_tune. Waiting on camera...")
+                    self.send_arm_r_home_goal()
+                elif current == "home":
+                    self.get_logger().info("Executing 'home' mission step...")
+                    if not self.is_processing:
+                        self.is_processing = True
+                        self.send_arm_r_home_pose()
+                        # Mark as done once initiated or wait for result callback to call check_done_mission()
+                        self.missionLog.check_done_mission()
 
     def camera_feedback_callback(self, msg: PoseArray):
         if not msg.poses:
