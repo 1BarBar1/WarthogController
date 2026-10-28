@@ -47,9 +47,9 @@ class MissionControlNode(Node):
         self.declare_parameter("camera_feedback", "warthog/poses")
         self.declare_parameter("path_feedback", "warthog/plan")
         self.declare_parameter("auto_start", True)
-        # "wating":"","Pathing":""
+        # "wating":"","Pathing":"""Pathing":"",
         # Change this line in __init__:
-        missions = {"Pathing":"","visual_tune": "", "hello_moveit": ""}
+        missions = {"visual_tune": "", "hello_moveit": ""}
         self.missionLog = MissionLog(missions)
 
         explore_topic = self.get_parameter("exploration_trigger").value
@@ -102,6 +102,19 @@ class MissionControlNode(Node):
     # ---------------------------------------------------------
     # TRIGGER MANAGER LOGIC
     # ---------------------------------------------------------
+    def launch_scripts(self):
+        # moveit_workspace_setup = "/home/warthog/Public/harry_summerjob/robobuilder_native/Robobuilder_moveit2_perception/install/setup.bash"
+        moveit_workspace_setup = "install/setup.bash"
+        # Chain the source command and the ros2 launch command together
+        cmd_moveit = f"source {moveit_workspace_setup} && ros2 launch hello_moveit pick_place_ur5e.launch.py"
+
+        # Note: We use shell=True and specify bash so the 'source' command works properly
+        self.process_moveit = subprocess.Popen(cmd_moveit, shell=True, executable='/bin/bash')
+        self.get_logger().info(f"Started hello_moveit (PID {self.process_moveit.pid}) from external workspace")
+
+        # Finalize the mission log
+        self.missionLog.check_done_mission()
+        self.get_logger().info("All missions complete!")
     def trigger_callback(self, msg: Bool):
         if msg.data and not self.is_processing:
             self.is_processing = True
@@ -111,7 +124,11 @@ class MissionControlNode(Node):
             self.get_logger().warn("Pipeline is already executing. Trigger ignored.")
 
     def send_arm_r_home_goal(self):
-
+        self.get_logger().info("Waiting for Arm R controller action server...")
+        if not self._arm_r_action_client.wait_for_server(timeout_sec=3.0):
+            self.get_logger().warn("Arm action server not found! Proceeding to next step anyway...")
+            self.on_arm_movement_finished()
+            return
 
         goal_msg = FollowJointTrajectory.Goal()
         goal_msg.trajectory.joint_names = [
@@ -135,8 +152,9 @@ class MissionControlNode(Node):
     def goal_response_callback(self, future):
         goal_handle = future.result()
         if not goal_handle.accepted:
-            self.get_logger().error("Arm R gripping_pose goal rejected by controller!")
+            self.get_logger().error("Arm R gripping_pose goal rejected by controller! Proceeding anyway...")
             self.is_processing = False
+            self.on_arm_movement_finished()
             return
 
         self.get_logger().info("Arm R goal accepted. Moving Arm R to gripping_pose...")
@@ -145,23 +163,18 @@ class MissionControlNode(Node):
 
     def get_result_callback(self, future):
         self.get_logger().info("Arm R has reached gripping_pose successfully!")
-        self.get_logger().info("Step 2: Launching 'oden publisher' and 'hello_moveit pick_place_ur5e'...")
-        self.launch_scripts()
+        self.on_arm_movement_finished()
 
-    def launch_scripts(self):
-
-        moveit_workspace_setup = "/home/warthog/Public/harry_summerjob/robobuilder_native/Robobuilder_moveit2_perception/install/setup.bash"
-
-        # Chain the source command and the ros2 launch command together
-        cmd_moveit = f"source {moveit_workspace_setup} && ros2 launch hello_moveit pick_place_ur5e.launch.py"
-
-        # Note: We use shell=True and specify bash so the 'source' command works properly
-        self.process_moveit = subprocess.Popen(cmd_moveit, shell=True, executable='/bin/bash')
-        self.get_logger().info(f"Started hello_moveit (PID {self.process_moveit.pid}) from external workspace")
-
-        # Finalize the mission log
-        self.missionLog.check_done_mission()
-        self.get_logger().info("All missions complete!")
+    def on_arm_movement_finished(self):
+        """Routes the state machine AFTER the arm finishes moving."""
+        current = self.missionLog.current_mission()
+        
+        if current == "visual_tune":
+            self.get_logger().info("Arm is in position. Starting visual servoing now...")
+            self.trigger_visual_servo(True)
+        elif current == "hello_moveit":
+            self.get_logger().info("Arm is in position. Launching hello_moveit scripts...")
+            self.launch_scripts()
 
     # ---------------------------------------------------------
     # MISSION CONTROL LOGIC
@@ -175,9 +188,8 @@ class MissionControlNode(Node):
         elif current == "Pathing":
             self.trigger_path(True)
         elif current == "visual_tune":
+            self.get_logger().info("waiting on camera data visual_tune... moving arm first.")
             self.send_arm_r_home_goal()
-            self.trigger_visual_servo(True)
-            self.get_logger().info("waiting on camera data visual_tune...")
         elif current == "hello_moveit":
 
             self.get_logger().info("Resuming at hello_moveit! Triggering arm sequence...")
@@ -233,9 +245,8 @@ class MissionControlNode(Node):
             x, y, yaw = map(float, next_goal.split(','))
             self.publish_goal(x, y, yaw)
         elif next_stage == "visual_tune":
+            self.get_logger().info("waiting on camera data visual_tune... moving arm first.")
             self.send_arm_r_home_goal()
-            self.trigger_visual_servo(True)
-            self.get_logger().info("Switch to visual_tune. waiting on camera...")
         elif next_stage == "hello_moveit":
             self.get_logger().info("Switching to hello_moveit! Triggering arm sequence...")
             if not self.is_processing:
@@ -291,9 +302,8 @@ class MissionControlNode(Node):
                     self.get_logger().info("All missions done.")
                     return
                 elif next_stage == "visual_tune":
+                    self.get_logger().info("waiting on camera data visual_tune... moving arm first.")
                     self.send_arm_r_home_goal()
-                    self.trigger_visual_servo(True)
-                    self.get_logger().info("Switching to visual_tune. Waiting on camera...")
 
                 next_goal = self.missionLog.next_mission()
                 if next_goal and next_goal != "":
