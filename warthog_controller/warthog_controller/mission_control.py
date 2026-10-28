@@ -127,42 +127,7 @@ class MissionControlNode(Node):
             self.send_arm_r_home_goal()
         elif self.is_processing:
             self.get_logger().warn("Pipeline is already executing. Trigger ignored.")
-    def send_arm_r_home_pose(self):
-        """Sends Arm R to the predefined 'home' group state configuration."""
-        goal_msg = FollowJointTrajectory.Goal()
-        goal_msg.trajectory.joint_names = [
-            "arm_r_shoulder_pan_joint",
-            "arm_r_shoulder_lift_joint",
-            "arm_r_elbow_joint",
-            "arm_r_wrist_1_joint",
-            "arm_r_wrist_2_joint",
-            "arm_r_wrist_3_joint",
-        ]
 
-        point = JointTrajectoryPoint()
-        # Joint values from your <group_state name="home" group="ur5e_manipulator_r">
-        point.positions = [-0.1745, -3.4034, 2.7053, -1.6581, -1.5708, 0.2967]
-        point.time_from_start = Duration(sec=5, nanosec=0)
-        goal_msg.trajectory.points.append(point)
-
-        self.get_logger().info("Sending trajectory goal for Arm R 'home' pose...")
-        send_goal_future = self._arm_r_action_client.send_goal_async(goal_msg)
-        send_goal_future.add_done_callback(self.home_goal_response_callback)
-
-    def home_goal_response_callback(self, future):
-        goal_handle = future.result()
-        if not goal_handle.accepted:
-            self.get_logger().error("Arm R 'home' pose goal rejected by controller!")
-            self.is_processing = False
-            return
-
-        self.get_logger().info("Arm R 'home' goal accepted. Moving...")
-        get_result_future = goal_handle.get_result_async()
-        get_result_future.add_done_callback(self.home_get_result_callback)
-
-    def home_get_result_callback(self, future):
-        self.get_logger().info("Arm R has reached 'home' pose successfully!")
-        self.is_processing = False
     def send_arm_r_home_goal(self):
         self.get_logger().info("Waiting for Arm R controller action server...")
         if not self._arm_r_action_client.wait_for_server(timeout_sec=3.0):
@@ -203,9 +168,18 @@ class MissionControlNode(Node):
 
     def get_result_callback(self, future):
         self.get_logger().info("Arm R has reached gripping_pose successfully!")
-        self.get_logger().info("Step 2: Launching 'oden publisher' and 'hello_moveit pick_place_ur5e'...")
-        self.launch_scripts()
+        self.on_arm_movement_finished()
 
+    def on_arm_movement_finished(self):
+        """Routes the state machine AFTER the arm finishes moving."""
+        current = self.missionLog.current_mission()
+
+        if current == "visual_tune":
+            self.get_logger().info("Arm is in position. Starting visual servoing now...")
+            self.trigger_visual_servo(True)
+        elif current == "hello_moveit":
+            self.get_logger().info("Arm is in position. Launching hello_moveit scripts...")
+            self.launch_scripts()
     # ---------------------------------------------------------
     # MISSION CONTROL LOGIC
     # ---------------------------------------------------------
@@ -229,13 +203,6 @@ class MissionControlNode(Node):
                     self.get_logger().warn("Arm R controller action server not reached within 3s. Launching perception & MoveIt directly...")
                     self.launch_scripts()
                 self.send_arm_r_home_goal()
-        elif current == "home":
-            self.get_logger().info("Executing 'home' mission step...")
-            if not self.is_processing:
-                self.is_processing = True
-                self.send_arm_r_home_pose()
-                # Mark as done once initiated or wait for result callback to call check_done_mission()
-                self.missionLog.check_done_mission()
         elif current is not None:
             val = self.missionLog.next_mission()
             if val and val != "":
@@ -289,13 +256,6 @@ class MissionControlNode(Node):
             if not self.is_processing:
                 self.is_processing = True
                 self.send_arm_r_home_goal()
-        elif current == "home":
-            self.get_logger().info("Executing 'home' mission step...")
-            if not self.is_processing:
-                self.is_processing = True
-                self.send_arm_r_home_pose()
-                # Mark as done once initiated or wait for result callback to call check_done_mission()
-                self.missionLog.check_done_mission()
 
     def publish_goal(self, x: float, y: float, yaw: float = 0.0):
         goal_msg = PoseStamped()
@@ -373,13 +333,7 @@ class MissionControlNode(Node):
                 elif next_stage == "visual_tune":
                     self.get_logger().info("Switching to visual_tune. Waiting on camera...")
                     self.send_arm_r_home_goal()
-                elif current == "home":
-                    self.get_logger().info("Executing 'home' mission step...")
-                    if not self.is_processing:
-                        self.is_processing = True
-                        self.send_arm_r_home_pose()
-                        # Mark as done once initiated or wait for result callback to call check_done_mission()
-                        self.missionLog.check_done_mission()
+
 
     def camera_feedback_callback(self, msg: PoseArray):
         if not msg.poses:
