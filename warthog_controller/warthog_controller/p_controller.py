@@ -36,6 +36,7 @@ class Controller(Node):
         self.declare_parameter('kp_linear', 0.5)
         self.declare_parameter('kp_angular', 1.0)
         self.declare_parameter('dist_tolerance', 0.2)
+        self.declare_parameter('standoff_distance', 1.40)
         self.declare_parameter('yaw_tolerance', 0.1)
         self.declare_parameter('max_linear_speed', 0.5)
         self.declare_parameter('max_angular_speed', 1.0)
@@ -56,6 +57,7 @@ class Controller(Node):
         self.max_angular_speed = float(self.get_parameter('max_angular_speed').value)
         control_rate = float(self.get_parameter('control_rate').value)
         self.base_frame = str(self.get_parameter('base_frame').value)
+        self.standoff_distance = float(self.get_parameter('standoff_distance').value)
 
         # Publishers
         self.publisher = self.create_publisher(Twist, cmd_vel_topic, 10)
@@ -190,8 +192,11 @@ class Controller(Node):
         dy = self.goal_y - self.y
         dist_error = math.hypot(dx, dy)
 
+        effective_dist = dist_error - self.standoff_distance
+
         # PHASE 1: Position control (drive towards target coordinate)
-        if dist_error > self.dist_tolerance:
+        # Use effective_dist instead of dist_error
+        if effective_dist > self.dist_tolerance:
             target_angle = math.atan2(dy, dx)
             yaw_error = normalize_angle(target_angle - self.yaw)
 
@@ -203,7 +208,8 @@ class Controller(Node):
             if abs(yaw_error) > math.pi / 4:
                 x_speed = 0.0
             else:
-                x_speed = self.kp_linear * dist_error * max(0.0, math.cos(yaw_error))
+                # Use effective_dist for P-control to decelerate smoothly as it reaches the standoff radius
+                x_speed = self.kp_linear * effective_dist * max(0.0, math.cos(yaw_error))
                 x_speed = max(min(x_speed, self.max_linear_speed), -self.max_linear_speed)
 
             self.publish_cmd(x_speed, z_speed)
