@@ -125,17 +125,24 @@ class MissionControlNode(Node):
         moveit_workspace_setup = "install/setup.bash"
         cmd_moveit = f"source {moveit_workspace_setup} && ros2 launch hello_moveit pick_place_ur5e.launch.py"
 
-        self.get_logger().info("Starting hello_moveit... waiting for it to finish before going Home.")
-        
-        # Use subprocess.run() to PAUSE the Python script until MoveIt is completely done
-        subprocess.run(cmd_moveit, shell=True, executable='/bin/bash')
-        
-        self.get_logger().info("hello_moveit finished!")
+        self.get_logger().info("Starting hello_moveit in background... waiting for it to finish before going Home.")
 
-        # Finalize the moveit mission and trigger the next one (Home)
-        self.missionLog.check_done_mission()
-        self.start_robot()
-   
+        # Non-blocking call
+        self.process_moveit = subprocess.Popen(cmd_moveit, shell=True, executable='/bin/bash')
+
+        # Create a timer to check the process status without blocking the main thread
+        self.moveit_poll_timer = self.create_timer(1.0, self.check_moveit_process)
+
+    def check_moveit_process(self):
+        # poll() returns None if process is still running, or the exit code if finished
+        if self.process_moveit and self.process_moveit.poll() is not None:
+            self.get_logger().info("hello_moveit finished!")
+            self.moveit_poll_timer.cancel() # Stop polling
+
+            # Finalize the moveit mission and trigger the next one (Home)
+            self.missionLog.check_done_mission()
+            self.start_robot()
+
     def trigger_callback(self, msg: Bool):
         if msg.data and not self.is_processing:
             self.is_processing = True
@@ -236,7 +243,7 @@ class MissionControlNode(Node):
     def home_get_result_callback(self, future):
         self.get_logger().info("Robot has arrived Home successfully!")
         self.missionLog.check_done_mission()
-        
+
         # Check if there are any missions after Home
         next_stage = self.missionLog.current_mission()
         if next_stage is None:
@@ -404,35 +411,41 @@ class MissionControlNode(Node):
                 print(distance)
                 if distance < self.distance_tolerance:
                     self.get_logger().info("Reached the last point! Canceling Nav2 mission...")
-
                     self.trigger_path(False)
 
                     if self.nav_cancel_client.wait_for_service(timeout_sec=1.0):
                         cancel_req = CancelGoal.Request()
-                        self.nav_cancel_client.call_async(cancel_req)
-                        self.get_logger().warn("Nav2 cancel service!")
+                        cancel_future = self.nav_cancel_client.call_async(cancel_req)
+                        # Defer the mission transition until cancellation completes
+                        cancel_future.add_done_callback(self.on_nav2_canceled)
                     else:
-                        self.get_logger().warn("Nav2 cancel service not available!")
+                        self.get_logger().warn("Nav2 cancel service not available! Forcing transition...")
+                        self.on_nav2_canceled(None)
 
-                    self.missionLog.check_done_mission()
+    def on_nav2_canceled(self, future):
+        self.get_logger().info("Nav2 goal successfully canceled. Proceeding to next mission.")
+        self.missionLog.check_done_mission()
 
-                    next_stage = self.missionLog.current_mission()
-                    if next_stage is None:
-                        self.get_logger().info("All missions done.")
-                        return
-                    elif next_stage == "visual_tune":
-                        self.get_logger().info("waiting on camera data visual_tune... moving arm first.")
-                        self.send_arm_r_home_goal()
+        next_stage = self.missionLog.current_mission()
+        if next_stage is None:
+            self.get_logger().info("All missions done.")
+            return
 
-                    next_goal = self.missionLog.next_mission()
-                    if next_goal and next_goal != "":
-                        x, y, yaw = map(float, next_goal.split(','))
-                        self.publish_goal(x, y, yaw)
-                    elif next_stage == "visual_tune":
-                        self.get_logger().info("Switching to visual_tune. Waiting on camera...")
-                        self.send_arm_r_home_goal()
-
-
+        next_goal = self.missionLog.next_mission()
+        if next_goal and next_goal != "":
+            x, y, yaw = map(float, next_goal.split(','))
+            self.publish_goal(x, y, yaw)
+        elif next_stage == "visual_tune":
+            self.get_logger().info("Switching to visual_tune. Moving arm first...")
+            self.send_arm_r_home_goal()
+        elif next_stage == "hello_moveit":
+            self.get_logger().info("Switching to hello_moveit! Triggering arm sequence...")
+            if not self.is_processing:
+                self.is_processing = True
+                self.send_arm_r_home_goal()
+        elif next_stage == "Home":
+            self.get_logger().info("Switching to Home mission. Preparing to drive back...")
+            self.send_home_goal()
     def camera_feedback_callback(self, msg: PoseArray):
         if not msg.poses:
             return
