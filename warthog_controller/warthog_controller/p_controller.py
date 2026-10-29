@@ -1,11 +1,13 @@
 import math
 from typing import Optional
 
-from geometry_msgs.msg import PoseStamped, Twist
+from geometry_msgs.msg import PoseStamped, Twist, PoseArray
 from nav_msgs.msg import Odometry
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Bool
+from tf2_ros import Buffer, TransformListener, TransformException
+import tf2_geometry_msgs  # Required to enable buffer.transform() for PoseStamped
 
 
 def normalize_angle(angle: float) -> float:
@@ -27,10 +29,13 @@ class Controller(Node):
     def __init__(self):
         super().__init__('p_controller_node')
 
+        self.tf_buffer = Buffer()
+        self.tf_listener = TransformListener(self.tf_buffer, self)
+
         # Declare parameters
         self.declare_parameter('cmd_vel_topic', 'warthog/cmd_vel_step')
-        self.declare_parameter('odom_topic', 'warthog/odometry/imu')
-        self.declare_parameter('goal_topic', 'warthog/goal_pose')
+        self.declare_parameter('odom_topic', '/warthog/fast_lio/odometry/imu')
+        self.declare_parameter('goal_topic', '/warthog/gecko_inspection/view_plan')
         self.declare_parameter('new_pos_topic', 'warthog/new_position')
         self.declare_parameter('reached_topic', 'warthog/reached')
         self.declare_parameter('kp_linear', 0.5)
@@ -67,14 +72,14 @@ class Controller(Node):
         self.odom_subscriber = self.create_subscription(
             Odometry, self.odom_topic, self.odom_callback, 10
         )
-        if self.odom_topic != 'warthog/odom':
+        if self.odom_topic != '/warthog/fast_lio/odometry/imu':
             self.fallback_odom_sub = self.create_subscription(
-                Odometry, 'warthog/odom', self.fallback_odom_callback, 10
+                Odometry, '/warthog/fast_lio/odometry/imu', self.fallback_odom_callback, 10
             )
 
         # Goal subscriptions: supports both mission_control goal_topic and legacy new_pos_topic
         self.goal_subscriber = self.create_subscription(
-            PoseStamped, self.goal_topic, self.goal_callback, 10
+            PoseArray, self.goal_topic, self.goal_callback, 10
         )
         if self.new_pos_topic != self.goal_topic:
             self.new_pos_subscriber = self.create_subscription(
@@ -135,52 +140,61 @@ class Controller(Node):
                 self.pending_goal = None
                 self.process_goal(goal)
 
-    def goal_callback(self, msg: PoseStamped):
+    def goal_callback(self, msg: PoseArray):
         """Receive goal pose message."""
+        # 1. Safety check: make sure the array isn't empty to prevent IndexError
+        if not msg.poses:
+            self.get_logger().warn('Received an empty PoseArray, ignoring.')
+            return
+
+        # 2. Package the array's header and the final Pose into a PoseStamped object
+        target_pose = PoseStamped()
+        target_pose.header = msg.header
+        target_pose.pose = msg.poses[-1]
+
+        # 3. Cache or process as usual
         if not self.odom_received:
             self.get_logger().warn(
                 'Goal received before odometry; caching until odometry is available.'
             )
-            self.pending_goal = msg
+            self.pending_goal = target_pose
             return
-        self.process_goal(msg)
+
+        self.process_goal(target_pose)
 
     def process_goal(self, msg: PoseStamped):
-        """Transform and store goal pose in odometry frame."""
-        frame_id = msg.header.frame_id.strip() if msg.header.frame_id else ''
-        raw_x = msg.pose.position.x
-        raw_y = msg.pose.position.y
-        raw_yaw = get_yaw_from_quaternion(msg.pose.orientation)
+        """Transform and store goal pose in odometry frame using TF2."""
+        if not msg.header.frame_id:
+            self.get_logger().warn('Goal received with empty frame_id! Assuming odometry frame.')
+            msg.header.frame_id = self.odom_frame
 
-        # Check if the goal is expressed in the robot base frame
-        is_base_frame = (
-            'base' in frame_id.lower() or
-            (bool(self.base_frame) and frame_id == self.base_frame)
-        )
-
-        if is_base_frame:
-            # Transform relative base coordinates into global odometry frame
-            self.goal_x = self.x + (raw_x * math.cos(self.yaw) - raw_y * math.sin(self.yaw))
-            self.goal_y = self.y + (raw_x * math.sin(self.yaw) + raw_y * math.cos(self.yaw))
-            self.goal_yaw = normalize_angle(self.yaw + raw_yaw)
-            self.get_logger().info(
-                f'Relative goal received ({frame_id}): rel=({raw_x:.2f}, {raw_y:.2f}, '
-                f'yaw={raw_yaw:.2f}) -> target odom=({self.goal_x:.2f}, {self.goal_y:.2f}, '
-                f'yaw={self.goal_yaw:.2f})'
-            )
-        else:
-            # Target is already in global / odometry frame
-            self.goal_x = raw_x
-            self.goal_y = raw_y
-            self.goal_yaw = raw_yaw
-            self.get_logger().info(
-                f'Global goal received ({frame_id}): target odom=({self.goal_x:.2f}, '
-                f'{self.goal_y:.2f}, yaw={self.goal_yaw:.2f})'
+        try:
+            # Let tf2 handle the math, no matter what frame the goal is in (map, base_link, camera, etc.)
+            # The timeout ensures it waits briefly if the tf tree is slightly lagging
+            transformed_msg = self.tf_buffer.transform(
+                msg,
+                self.odom_frame,
+                timeout=rclpy.duration.Duration(seconds=1.0)
             )
 
-        self.goal_reached = False
-        self.goal_active = True
-        self.stop_pub_count = 0
+            # Extract the fully transformed global coordinates
+            self.goal_x = transformed_msg.pose.position.x
+            self.goal_y = transformed_msg.pose.position.y
+            self.goal_yaw = get_yaw_from_quaternion(transformed_msg.pose.orientation)
+
+            self.get_logger().info(
+                f"Transformed goal from '{msg.header.frame_id}' to '{self.odom_frame}': "
+                f"x={self.goal_x:.2f}, y={self.goal_y:.2f}, yaw={self.goal_yaw:.2f}"
+            )
+
+            self.goal_reached = False
+            self.goal_active = True
+            self.stop_pub_count = 0
+
+        except TransformException as ex:
+            self.get_logger().error(f'Failed to transform goal from {msg.header.frame_id} to {self.odom_frame}: {ex}')
+            # The goal is dropped, but the node survives and waits for a valid goal
+            return
 
     def timer_callback(self):
         """Execute control loop iteration."""
