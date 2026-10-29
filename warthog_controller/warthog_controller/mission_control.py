@@ -9,6 +9,7 @@ from nav_msgs.msg import Path, Odometry
 from action_msgs.srv import CancelGoal
 from control_msgs.action import FollowJointTrajectory
 from trajectory_msgs.msg import JointTrajectoryPoint
+from nav2_msgs.action import NavigateToPose
 import tf2_ros
 import tf2_geometry_msgs
 import time as time
@@ -77,6 +78,11 @@ class MissionControlNode(Node):
         self.odom_subscription = self.create_subscription(Odometry, 'warthog/odometry/imu', self.odom_callback, 10)
 
         self.nav_cancel_client = self.create_client(CancelGoal, 'warthog/navigate_to_pose/_action/cancel_goal')
+        self.nav_action_client = ActionClient(
+            self,
+            NavigateToPose,
+            'warthog/navigate_to_pose'
+        )
 
         self.current_x = None
         self.current_y = None
@@ -86,6 +92,9 @@ class MissionControlNode(Node):
         self.is_visual_servoing = False
         self.path_enable = False
         self.target_frame = 'warthog/base_link'
+        self.endOfPath = None
+        self.startOfPath = None
+        self.endOfPath = None
         # --- Trigger Manager Additions ---
         self.start_trigger_sub = self.create_subscription(Bool, "warthog/start_trigger", self.trigger_callback, 10)
         self._arm_r_action_client = ActionClient(
@@ -105,23 +114,28 @@ class MissionControlNode(Node):
 
         if self.auto_start:
             self.start_timer = self.create_timer(1.0, self.start_robot)
+        # Create a recurring timer to check path progress (every 0.1 seconds)
+        self.status_timer = self.create_timer(0.1, self.timer_callback)
 
     # ---------------------------------------------------------
     # TRIGGER MANAGER LOGIC
     # ---------------------------------------------------------
     def launch_scripts(self):
-        moveit_workspace_setup = "/home/warthog/Public/harry_summerjob/robobuilder_native/Robobuilder_moveit2_perception/install/setup.bash"
-        #moveit_workspace_setup = "install/setup.bash"
-        # Chain the source command and the ros2 launch command together
+        # moveit_workspace_setup = "/home/warthog/Public/harry_summerjob/robobuilder_native/Robobuilder_moveit2_perception/install/setup.bash"
+        moveit_workspace_setup = "install/setup.bash"
         cmd_moveit = f"source {moveit_workspace_setup} && ros2 launch hello_moveit pick_place_ur5e.launch.py"
 
-        # Note: We use shell=True and specify bash so the 'source' command works properly
-        self.process_moveit = subprocess.Popen(cmd_moveit, shell=True, executable='/bin/bash')
-        self.get_logger().info(f"Started hello_moveit (PID {self.process_moveit.pid}) from external workspace")
+        self.get_logger().info("Starting hello_moveit... waiting for it to finish before going Home.")
+        
+        # Use subprocess.run() to PAUSE the Python script until MoveIt is completely done
+        subprocess.run(cmd_moveit, shell=True, executable='/bin/bash')
+        
+        self.get_logger().info("hello_moveit finished!")
 
-        # Finalize the mission log
+        # Finalize the moveit mission and trigger the next one (Home)
         self.missionLog.check_done_mission()
-        self.get_logger().info("All missions complete!")
+        self.start_robot()
+   
     def trigger_callback(self, msg: Bool):
         if msg.data and not self.is_processing:
             self.is_processing = True
@@ -182,6 +196,53 @@ class MissionControlNode(Node):
         elif current == "hello_moveit":
             self.get_logger().info("Arm is in position. Launching hello_moveit scripts...")
             self.launch_scripts()
+        # ADD THIS BLOCK
+        elif current == "Home":
+            self.get_logger().info("Switching to Home mission. Preparing to drive back...")
+            self.send_home_goal()
+    # ---------------------------------------------------------
+    # GO HOME (NAV2 ACTION CLIENT) LOGIC
+    # ---------------------------------------------------------
+    def send_home_goal(self):
+        if self.startOfPath is None:
+            self.get_logger().error("Cannot go home: startOfPath was never saved!")
+            self.missionLog.check_done_mission()
+            self.start_robot() # Move to next mission if it fails
+            return
+
+        self.get_logger().info("Waiting for Nav2 action server to send Home goal...")
+        if not self.nav_action_client.wait_for_server(timeout_sec=3.0):
+            self.get_logger().error("Nav2 action server not available!")
+            return
+
+        # Create the action goal and assign the saved start pose
+        goal_msg = NavigateToPose.Goal()
+        goal_msg.pose = self.startOfPath
+
+        self.get_logger().info("Sending Home goal to Nav2...")
+        send_goal_future = self.nav_action_client.send_goal_async(goal_msg)
+        send_goal_future.add_done_callback(self.home_goal_response_callback)
+
+    def home_goal_response_callback(self, future):
+        goal_handle = future.result()
+        if not goal_handle.accepted:
+            self.get_logger().error("Home goal rejected by Nav2!")
+            return
+
+        self.get_logger().info("Home goal accepted. Navigating back to start...")
+        get_result_future = goal_handle.get_result_async()
+        get_result_future.add_done_callback(self.home_get_result_callback)
+
+    def home_get_result_callback(self, future):
+        self.get_logger().info("Robot has arrived Home successfully!")
+        self.missionLog.check_done_mission()
+        
+        # Check if there are any missions after Home
+        next_stage = self.missionLog.current_mission()
+        if next_stage is None:
+            self.get_logger().info("All missions complete!")
+        else:
+            self.start_robot()
     # ---------------------------------------------------------
     # MISSION CONTROL LOGIC
     # ---------------------------------------------------------
@@ -205,6 +266,10 @@ class MissionControlNode(Node):
                     self.get_logger().warn("Arm R controller action server not reached within 3s. Launching perception & MoveIt directly...")
                     self.launch_scripts()
                 self.send_arm_r_home_goal()
+        # ADD THIS BLOCK
+        elif current == "Home":
+            self.get_logger().info("Switching to Home mission. Preparing to drive back...")
+            self.send_home_goal()
         elif current is not None:
             val = self.missionLog.next_mission()
             if val and val != "":
@@ -221,7 +286,8 @@ class MissionControlNode(Node):
         self.get_logger().info(f"{'Started' if enable else 'Stopped'} pathing.")
 
     def trigger_visual_servo(self, enable: bool):
-        time.sleep(10)
+        if enable is True:
+            time.sleep(10)
         self.vs_trigger_publisher.publish(Bool(data=enable))
         self.is_visual_servoing = enable
         self.get_logger().info(f"{'Started' if enable else 'Stopped'} visual servoing.")
@@ -259,6 +325,10 @@ class MissionControlNode(Node):
             if not self.is_processing:
                 self.is_processing = True
                 self.send_arm_r_home_goal()
+        # ADD THIS BLOCK
+        elif next_stage == "Home":
+            self.get_logger().info("Switching to Home mission. Preparing to drive back...")
+            self.send_home_goal()
 
     def publish_goal(self, x: float, y: float, yaw: float = 0.0):
         goal_msg = PoseStamped()
@@ -297,60 +367,70 @@ class MissionControlNode(Node):
             if self.current_x is None or self.current_y is None:
                 self.get_logger().warn("Waiting for odometry data to check path distance...")
                 return
-
-            endOfPath = PoseStamped()
-            endOfPath.header = msg.header
-            endOfPath.pose = msg.poses[-1]
+            if len(msg.poses) > 1:
+                self.startOfPath = msg.poses[1]
+            self.endOfPath = msg.poses[-1]
             #print(f'end of pose {endOfPath.pose.position.x}, {endOfPath.pose.position.y}')
 
-            try:
-                # 2. Transform the PoseStamped
-                tfPose = self.tf_buffer.lookup_transform(
-                    #endOfPath,
-                    'warthog/map',
-                    'warthog/base_link',
-
-                    # timeout=rclpy.duration.Duration(seconds=0.1),
-                    rclpy.time.Time(),
-                )
-                robotCurrentPose=self.transformToPose(tfPose)
-            except (tf2_ros.LookupException, tf2_ros.ConnectivityException, tf2_ros.ExtrapolationException) as ex:
-                self.get_logger().warn(f'Could not transform: {ex}')
-                return
-
-            last_pose = robotCurrentPose.pose.position
-            print(last_pose.x, last_pose.y)
-            distance = math.hypot(endOfPath.pose.pose.position.x - robotCurrentPose.pose.position.x, endOfPath.pose.pose.position.y - robotCurrentPose.pose.position.y)
-            print(distance)
-            if distance < self.distance_tolerance:
-                self.get_logger().info("Reached the last point! Canceling Nav2 mission...")
-
-                self.trigger_path(False)
-
-                if self.nav_cancel_client.wait_for_service(timeout_sec=1.0):
-                    cancel_req = CancelGoal.Request()
-                    self.nav_cancel_client.call_async(cancel_req)
-                    self.get_logger().warn("Nav2 cancel service!")
-                else:
-                    self.get_logger().warn("Nav2 cancel service not available!")
-
-                self.missionLog.check_done_mission()
-
-                next_stage = self.missionLog.current_mission()
-                if next_stage is None:
-                    self.get_logger().info("All missions done.")
+    def timer_callback(self):
+        current = self.missionLog.current_mission()
+        if current == "Pathing":
+            if self.path_enable and self.endOfPath is not None:
+                if self.current_x is None or self.current_y is None:
+                    self.get_logger().warn("Waiting for odometry data to check path distance...")
                     return
-                elif next_stage == "visual_tune":
-                    self.get_logger().info("waiting on camera data visual_tune... moving arm first.")
-                    self.send_arm_r_home_goal()
 
-                next_goal = self.missionLog.next_mission()
-                if next_goal and next_goal != "":
-                    x, y, yaw = map(float, next_goal.split(','))
-                    self.publish_goal(x, y, yaw)
-                elif next_stage == "visual_tune":
-                    self.get_logger().info("Switching to visual_tune. Waiting on camera...")
-                    self.send_arm_r_home_goal()
+                #print(f'end of pose {endOfPath.pose.position.x}, {endOfPath.pose.position.y}')
+
+                try:
+                    # 2. Transform the PoseStamped
+                    tfPose = self.tf_buffer.lookup_transform(
+                        #endOfPath,
+                        'warthog/map',
+                        'warthog/base_link',
+
+                        # timeout=rclpy.duration.Duration(seconds=0.1),
+                        rclpy.time.Time(),
+                    )
+                    robotCurrentPose=self.transformToPose(tfPose)
+                except (tf2_ros.LookupException, tf2_ros.ConnectivityException, tf2_ros.ExtrapolationException) as ex:
+                    self.get_logger().warn(f'Could not transform: {ex}')
+                    return
+
+                last_pose = robotCurrentPose.pose.position
+                print(last_pose.x, last_pose.y)
+                # distance = math.hypot(self.endOfPath.pose.pose.position.x - robotCurrentPose.pose.position.x, self.endOfPath.pose.pose.position.y - robotCurrentPose.pose.position.y)
+                distance = math.hypot(self.endOfPath.pose.position.x - robotCurrentPose.pose.position.x, self.endOfPath.pose.position.y - robotCurrentPose.pose.position.y)
+                print(distance)
+                if distance < self.distance_tolerance:
+                    self.get_logger().info("Reached the last point! Canceling Nav2 mission...")
+
+                    self.trigger_path(False)
+
+                    if self.nav_cancel_client.wait_for_service(timeout_sec=1.0):
+                        cancel_req = CancelGoal.Request()
+                        self.nav_cancel_client.call_async(cancel_req)
+                        self.get_logger().warn("Nav2 cancel service!")
+                    else:
+                        self.get_logger().warn("Nav2 cancel service not available!")
+
+                    self.missionLog.check_done_mission()
+
+                    next_stage = self.missionLog.current_mission()
+                    if next_stage is None:
+                        self.get_logger().info("All missions done.")
+                        return
+                    elif next_stage == "visual_tune":
+                        self.get_logger().info("waiting on camera data visual_tune... moving arm first.")
+                        self.send_arm_r_home_goal()
+
+                    next_goal = self.missionLog.next_mission()
+                    if next_goal and next_goal != "":
+                        x, y, yaw = map(float, next_goal.split(','))
+                        self.publish_goal(x, y, yaw)
+                    elif next_stage == "visual_tune":
+                        self.get_logger().info("Switching to visual_tune. Waiting on camera...")
+                        self.send_arm_r_home_goal()
 
 
     def camera_feedback_callback(self, msg: PoseArray):
