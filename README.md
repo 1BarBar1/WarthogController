@@ -302,7 +302,7 @@ rosdep install --from-paths src --ignore-src -r -y
 
 ### Running the Nodes
 
-#### 1. Start the Proportional Controller
+#### 1. Start the Proportional Controller(persephone not tested)
 ```bash
 ros2 run warthog_controller p_controller_node
 ```
@@ -314,7 +314,7 @@ ros2 run warthog_controller p_controller_node --ros-args \
   -p dist_tolerance:=0.15
 ```
 
-#### 2. Start the Visual Servo Node
+#### 2. Start the Visual Servo Node(RoboBuilder)
 ```bash
 ros2 run warthog_controller visual_servo_node
 ```
@@ -325,7 +325,7 @@ ros2 run warthog_controller visual_servo_node --ros-args \
   -p max_linear_speed:=0.15
 ```
 
-#### 3. Start Mission Control
+#### 3. Start Mission Control(Robobuilder)
 ```bash
 ros2 run warthog_controller mission_control_node
 ```
