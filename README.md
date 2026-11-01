@@ -75,33 +75,57 @@ Vision-guided docking controller that drives the Warthog base toward detected 3D
 
 ## Build & Installation
 
-```bash
-# Source ROS 2 (e.g., Jazzy)
-source /opt/ros/jazzy/setup.bash
+1. Source your ROS 2 environment:
+   ```bash
+   source /opt/ros/jazzy/setup.bash
+   ```
 
-# Build the package from your colcon workspace
-colcon build --symlink-install --packages-select warthog_controller
+2. Build the `warthog_controller` package inside your workspace:
+   ```bash
+   cd /colcon_workspace/harry_ws
+   colcon build --symlink-install --packages-select warthog_controller
+   ```
 
-# Source the workspace overlay
-source install/setup.bash
-```
+3. Source the installed workspace overlay:
+   ```bash
+   source install/setup.bash
+   ```
 
 ---
 
-## Quick Start
+## Quick Start & Usage
 
 ### Running the Nodes
 
+#### 1. Start the Proportional Controller(persephone not tested)
 ```bash
-# 1. Proportional waypoint controller
 ros2 run warthog_controller p_controller_node
+```
+To run with custom velocity or gain limits:
+```bash
+ros2 run warthog_controller p_controller_node --ros-args \
+  -p max_linear_speed:=0.3 \
+  -p kp_linear:=0.4 \
+  -p dist_tolerance:=0.15
+```
 
-# 2. Visual servo controller
+#### 2. Start the Visual Servo Node(RoboBuilder)
+```bash
 ros2 run warthog_controller visual_servo_node
+```
+To set a specific standoff distance (e.g., 1.2 meters):
+```bash
+ros2 run warthog_controller visual_servo_node --ros-args \
+  -p standoff_distance:=1.20 \
+  -p max_linear_speed:=0.15
+```
 
-# 3. Mission control coordinator
+#### 3. Start Mission Control(Robobuilder)
+```bash
 ros2 run warthog_controller mission_control_node
 ```
+
+---
 
 > **Tip**: Any parameter can be overridden at launch, for example:  
 > `ros2 run warthog_controller visual_servo_node --ros-args -p standoff_distance:=1.20`
