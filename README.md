@@ -126,6 +126,35 @@ ros2 run warthog_controller mission_control_node
 ```
 
 ---
+### Robobuilder demo
+
+#### 2. Start the Visual Servo Node(RoboBuilder)
+```bash
+cd colcon_workspace/harry_ws
+ros2 run warthog_controller visual_servo_node
+```
+
+
+#### 3. Start Mission Control(Robobuilder)
+```bash
+cd colcon_workspace/harry_ws
+ros2 run warthog_controller mission_control_node
+```
+
+### 4. MoveIt drivers 
+```bash
+harry
+cd ../../
+ros2 launch ur5e_gripper_moveit_control custom_ur5e_calibration.launch.py
+```
+### 5. Perception node 
+```bash
+harry
+cd ../../
+ros2 run oden publisher
+```
+
+---
 
 > **Tip**: Any parameter can be overridden at launch, for example:  
 > `ros2 run warthog_controller visual_servo_node --ros-args -p standoff_distance:=1.20`
